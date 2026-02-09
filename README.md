@@ -225,3 +225,87 @@ On retry:
 - The database enforces **uniqueness** of job intent
 - The API **never executes** jobs
 - The endpoint is safe under **retries**, **crashes**, and **concurrent requests**
+
+### GET /jobs/{jobId}
+
+Retrieves the current status of a previously created job.
+
+#### Purpose
+
+This endpoint allows clients to observe job state after submitting a job via `POST /jobs`.  
+It is a **read-only** endpoint:
+
+- It does not create jobs
+- It does not execute jobs
+- It does not mutate system state
+
+Its only responsibility is to expose the durable truth stored in the database.
+
+#### Request
+
+```json
+
+GET /jobs/{jobId}
+
+```
+
+- `jobId` is the identifier returned by `POST /jobs`.
+
+#### Response (on success)
+
+The API returns the current, externally visible state of the job.
+
+Response includes:
+
+- `jobId`
+- `jobType`
+- `status` (e.g. `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`)
+- timestamps (e.g. `createdAt`, `updatedAt`)
+
+These fields are sufficient for clients to:
+
+- track progress
+- detect completion or failure
+- correlate job status with prior requests
+
+#### Fields Never Exposed
+
+The following are intentionally **not** returned:
+
+- `payload`
+- internal retry counters
+- worker identifiers
+- lease / lock metadata
+- internal error stack traces
+- infrastructure-specific details
+
+**Rationale:**
+
+- Payload may contain sensitive or large data
+- Internal fields are unstable and subject to change
+- The API contract exposes **outcomes**, not implementation details
+
+#### Safety and Retry Behavior
+
+This endpoint is **safe under retries**:
+
+- Repeated requests do not create side effects
+- Repeated requests always return the same job state for a given `jobId`
+- Network retries, client retries, and duplicate requests are harmless
+
+Because the endpoint is read-only, it is fully retryable and safe under all failure modes.
+
+#### Behavior if Job Does Not Exist
+
+If the specified `jobId` does not exist:
+
+- The API returns an appropriate client error (e.g. **404 Not Found**)
+- No state is created or modified
+
+#### Summary Guarantees for GET /jobs/{jobId}
+
+- The endpoint is **read-only**
+- It is **safe under retries and failures**
+- It exposes only stable, externally meaningful fields
+- It reflects the **database** as the single source of truth
+- It **never executes work** or mutates job state
