@@ -32,3 +32,90 @@ This system does not attempt to guarantee:
 - Exactly-once execution
 - Real-time completion guarantees
 - Global ordering of jobs
+
+## Job State Machine
+
+The system models job execution using an explicit state machine.  
+Each job exists in exactly one state at any time, and only predefined transitions are allowed.  
+This makes job execution predictable, debuggable, and safe under failures.
+
+---
+
+## Job States
+
+### CREATED
+The job has been durably created and stored by the API, but is not yet eligible for execution.  
+Only the API is allowed to move a job out of this state.
+
+### QUEUED
+The job is ready and eligible to be executed, but no worker currently owns it.  
+Any worker may attempt to acquire ownership and move the job to RUNNING.
+
+### RUNNING
+The job is currently owned by exactly one worker, which has exclusive rights to execute and update it.  
+Only the owning worker may move the job out of this state.
+
+### SUCCESS
+The job has completed successfully and all intended effects have been applied.  
+This is a terminal state and the job must never be executed again.
+
+### RETRY
+The job previously failed but is considered recoverable and will be retried after a backoff period.  
+The job is not executable in this state until it is re-queued.
+
+### DEAD
+The job has failed permanently after exhausting all retry attempts or encountering a fatal error.  
+This is a terminal state and requires manual intervention if further action is needed.
+
+---
+
+## State Transition Table
+
+Only the following state transitions are allowed.  
+Any transition not listed here is illegal by design.
+
+| From State | To State | Trigger |
+|-----------|----------|---------|
+| CREATED | QUEUED | API accepts job |
+| QUEUED | RUNNING | Worker acquires ownership |
+| RUNNING | SUCCESS | Owning worker completes job |
+| RUNNING | RETRY | Recoverable failure |
+| RETRY | QUEUED | Backoff period expires |
+| RETRY | DEAD | Retry limit exceeded |
+
+---
+
+## Failure Handling Scenarios
+
+### Worker crashes while RUNNING
+Jobs are leased to workers using time-limited ownership.  
+If a worker crashes or becomes unresponsive, its lease eventually expires, allowing the job to be safely recovered and retried without manual intervention.
+
+### Two workers attempt to pick the same job
+Workers do not directly pick jobs. Instead, they attempt an atomic state transition from QUEUED to RUNNING.  
+The database enforces this transition, ensuring that only one worker can successfully acquire ownership.
+
+### API crashes after creating a job
+If the API crashes after persisting a job but before responding to the client, the job remains safely stored in the CREATED state.  
+This prevents premature execution and allows the client to safely retry without risking duplicate or lost jobs.
+
+---
+
+## Data Model Rationale
+
+The data model exists to enforce the job state machine and its failure guarantees.
+
+### UUID primary key
+Provides globally unique, coordination-free job identity suitable for distributed systems.
+
+### state
+Acts as the single source of truth for job lifecycle and enforces valid state transitions.
+
+### retry_count
+Tracks how many times a job has failed and enables deterministic transition from RETRY to DEAD.
+
+### lease_expiry
+Enforces time-limited ownership, preventing jobs from being permanently stuck if a worker crashes.
+
+### timestamps (created_at, updated_at)
+Required for debugging, retry backoff calculations, and reasoning about system behavior over time.
