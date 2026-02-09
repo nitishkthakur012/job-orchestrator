@@ -309,3 +309,63 @@ If the specified `jobId` does not exist:
 - It exposes only stable, externally meaningful fields
 - It reflects the **database** as the single source of truth
 - It **never executes work** or mutates job state
+
+## Database Support for Idempotency
+
+Correct handling of retries and duplicate requests is enforced at the **database layer**.  
+The database acts as the **single source of truth** for job intent and guarantees correctness under concurrency, retries, and crashes.
+
+### Where the `idempotencyKey` Is Stored
+
+The `idempotencyKey` is stored **with the job record itself**.
+
+Each row in the `jobs` table represents a single logical job intent and includes:
+
+- `jobId`
+- `jobType`
+- `payload`
+- `idempotencyKey`
+- job status and metadata
+
+Storing the `idempotencyKey` alongside the job ensures that intent is:
+
+- durable
+- globally visible
+- recoverable after crashes
+
+### Why the `idempotencyKey` Must Be Unique
+
+The database enforces a **unique constraint** on `idempotencyKey`.
+
+This guarantees that:
+
+- Only one job can exist for a given logical intent
+- Concurrent requests cannot create duplicate jobs
+- Retries are safe even when multiple API servers handle requests simultaneously
+
+Uniqueness is enforced **atomically** by the database, ensuring correctness even under race conditions.
+
+### What Breaks Without DB-Level Uniqueness
+
+If uniqueness is **not** enforced at the database level:
+
+- **Race conditions occur**  
+  Concurrent requests may both create jobs before application-level checks detect duplication.
+
+- **Retries become unsafe**  
+  Client retries may create additional jobs instead of returning the original one.
+
+- **Crashes cause duplication**  
+  If the server crashes after inserting a job but before responding, a retry may create a second job.
+
+- **Horizontal scaling breaks correctness**  
+  Multiple API servers cannot reliably coordinate deduplication using in-memory or application-level logic.
+
+In such cases, the system may appear correct in low-load or single-server environments but **fail under real production conditions**.
+
+### Summary Guarantees
+
+- Idempotency is enforced by the **database**, not application memory.
+- Uniqueness constraints provide **atomic correctness** under concurrency.
+- The system remains **safe under retries, crashes, and horizontal scaling**.
+- All job intent can be **reconstructed** from durable database state.
