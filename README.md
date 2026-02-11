@@ -369,3 +369,101 @@ In such cases, the system may appear correct in low-load or single-server enviro
 - Uniqueness constraints provide **atomic correctness** under concurrency.
 - The system remains **safe under retries, crashes, and horizontal scaling**.
 - All job intent can be **reconstructed** from durable database state.
+
+# Workers, Leasing & Concurrency Model
+
+## Overview
+This system utilizes a **DB-backed leasing model** to safely process jobs across multiple workers. The database serves as the single source of truth for job state and ownership, ensuring system integrity even under high concurrency.
+
+
+
+### Guarantees
+* **Exclusive job ownership**: No two workers can process the same job simultaneously.
+* **Safe concurrent processing**: Built-in protection against race conditions.
+* **Crash recovery**: Automatic recovery via lease expiration.
+* **Deterministic retries**: Clear, state-driven logic for failed tasks.
+* **Horizontal scalability**: Simply add more workers to increase throughput.
+
+---
+
+## Job Leasing Model
+
+### Ownership
+A worker owns a job when it has the exclusive right to execute and update it while the lease is valid. Ownership is strictly time-bound:
+> **Validity Requirement:** `current_time < lease_expiry`
+
+### Lease Expiry
+When a lease expires, the job automatically becomes **unowned** and eligible for acquisition by another worker. This prevents "permanently stuck" jobs that often occur with simple boolean flags (e.g., `locked = true`).
+
+### Job Eligibility
+A job is considered eligible for processing only if:
+1.  `state = QUEUED`
+2.  **AND** (`lease_expiry IS NULL` **OR** `lease_expiry < NOW()`)
+
+---
+
+## Job Acquisition & Concurrency
+The acquisition process is designed to be atomic and non-blocking.
+
+### The Acquisition Logic
+To ensure safe concurrency, the acquisition must:
+* Run inside a **DB transaction**.
+* Atomically select and assign the lease.
+* Skip locked rows to prevent worker starvation or waiting.
+* Acquire at most one job per attempt.
+
+**Implementation Detail:**
+Uses `SELECT ... FOR UPDATE SKIP LOCKED` to ensure exclusive ownership without blocking other workers.
+
+
+
+---
+
+## Worker Lifecycle
+Each worker operates in a continuous loop:
+1.  **Acquire**: One eligible job (within a transaction).
+2.  **Execute**: Perform the task logic **outside** the acquisition transaction.
+3.  **Persist**: Update the final result/state in the DB.
+4.  **Repeat**.
+
+---
+
+## State Transitions
+
+| Scenario | State Change | Metadata Updates |
+| :--- | :--- | :--- |
+| **On Success** | `SUCCESS` | `lease_owner = NULL`, `lease_expiry = NULL` |
+| **On Failure** | `QUEUED` or `DEAD` | `retry_count += 1`, `lease_owner = NULL`, `lease_expiry = NULL` |
+
+*Note: Workers never delete jobs; they only update states to maintain an audit trail.*
+
+---
+
+## Failure Handling
+The system is architected to tolerate various failure modes:
+* **Worker crash after lease**: Recovered automatically via expiry.
+* **Worker crash mid-execution**: Retried by the next available worker after expiry.
+* **Simultaneous polling**: The DB serializes ownership via transactions.
+* **DB restart**: State persists; locks reset safely upon recovery.
+
+---
+
+## System Boundaries
+
+### Goals
+* At-most-one worker ownership.
+* No duplicate execution.
+* Eventual job progress.
+
+### Non-Goals
+* **Exactly-once side effects**: (External API calls may still need idempotency).
+* **Distributed consensus**: Handled by the DB, not a separate layer like Paxos/Raft.
+* **Advanced scheduling**: (e.g., complex cron expressions).
+
+---
+
+## Design Principles
+* **Database is the authority.**
+* **Execution is unreliable** (Assume workers will fail).
+* **Ownership is time-bound.**
+* **Safety > Liveness.**
